@@ -1,205 +1,39 @@
-name: Build iOS IPA
+name: Build IPA
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  workflow_dispatch: # 支持在 GitHub 网页上手动点击按钮立即打包
 
 jobs:
-  build-ipa:
-    runs-on: macos-14
+  build:
+    runs-on: macos-14 # 运行在 GitHub 提供的云端苹果 Mac 虚拟机上
+
     steps:
-      - name: Checkout Repository
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Unzip & Prepare Project
+      - name: 设置 Xcode 版本
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      - name: 编译 SwiftPM App
         run: |
-          echo "=== 1. 解压项目 ==="
-          mkdir -p build_src
-          unzip -o *.zip -d build_src/ || true
-          
-          PKG_PATH=$(find build_src -name "Package.swift" | head -n 1)
-          if [ -z "$PKG_PATH" ]; then
-            echo "错误: 未找到 Package.swift"
-            exit 1
-          fi
-          
-          # 1. 修复 Package.swift
-          sed -i '' 's/26\.0/16\.0/g' "$PKG_PATH"
-          sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
-          sed -i '' '/BareSlashRegexLiterals/d' "$PKG_PATH"
-          
-          # 2. 重命名目录
-          PKG_DIR=$(dirname "$PKG_PATH")
-          SWIFTPM_DIR="$GITHUB_WORKSPACE/App.swiftpm"
-          rm -rf "$SWIFTPM_DIR"
-          mv "$PKG_DIR" "$SWIFTPM_DIR"
-          
-          # 3. 修补 Swift 多线程语法
-          echo "=== 2. 修补 Swift 多线程语法 ==="
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/final class LocalImageStore/final class LocalImageStore: @unchecked Sendable/g' {} +
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class AutoTranslationManager: ObservableObject/class AutoTranslationManager: @unchecked Sendable, ObservableObject/g' {} +
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class PhotoWidgetManager: ObservableObject/class PhotoWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class InsPostWidgetManager: ObservableObject/class InsPostWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class KoreanMessageWidgetManager: ObservableObject/class KoreanMessageWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
-          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class ChatBubbleWidgetManager: ObservableObject/class ChatBubbleWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
-          
-          echo "SWIFTPM_DIR=$SWIFTPM_DIR" >> $GITHUB_ENV
+          xcodebuild build \
+            -scheme AppModule \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO
 
-      - name: Build App with Xcode
+      - name: 封装为 IPA 文件
         run: |
-          cd "$SWIFTPM_DIR"
-          
-          export LANG=en_US.UTF-8
-          export LC_ALL=en_US.UTF-8
-          
-          SCHEME=$(xcodebuild -list | awk '/Schemes:/{flag=1; next} /^[[:space:]]*$/{flag=0} flag' | sed -e 's/^[[:space:]]*//' | head -n 1)
-          if [ -z "$SCHEME" ]; then
-            SCHEME="AppModule"
-          fi
-          echo "目标 Scheme: $SCHEME"
+          mkdir -p Payload
+          # 寻找编译出的 .app 产物并打包
+          APP_PATH=$(find ./build/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+          zip -r You.ipa Payload
+          echo "打包完成！"
 
-          rm -rf /tmp/derived_data
-          echo "=== 3. 开始编译 ==="
-          xcodebuild -destination 'generic/platform=iOS' \
-                     -scheme "$SCHEME" \
-                     -configuration Release \
-                     -derivedDataPath /tmp/derived_data \
-                     PRODUCT_BUNDLE_IDENTIFIER="com.youdao.app" \
-                     ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
-                     CODE_SIGNING_ALLOWED=NO \
-                     CODE_SIGNING_REQUIRED=NO \
-                     CODE_SIGN_IDENTITY="" \
-                     PROVISIONING_PROFILE_SPECIFIER="" \
-                     OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
-                     2>&1 | tee build.log || {
-                       echo "================ 编译错误日志 ================"
-                       grep -i -C 3 "error:" build.log || tail -n 50 build.log
-                       exit 1
-                     }
-
-      - name: Fix Binary Name and Package IPA
-        run: |
-          echo "=== 4. 重命名中文二进制主程序为 ASCII 纯英文，解决全能签‘文件有错误’报错 ==="
-          cd "$GITHUB_WORKSPACE"
-
-          python3 - << 'EOF'
-          import os, shutil, plistlib, subprocess, glob
-
-          workspace = os.environ.get("GITHUB_WORKSPACE", ".")
-          payload_dir = os.path.join(workspace, "Payload")
-          app_dir = os.path.join(payload_dir, "App.app")
-
-          if os.path.exists(payload_dir):
-              shutil.rmtree(payload_dir)
-
-          os.makedirs(app_dir, exist_ok=True)
-
-          derived_dir = "/tmp/derived_data"
-          app_products = glob.glob(f"{derived_dir}/Build/Products/**/*.app", recursive=True)
-          if not app_products:
-              app_products = glob.glob(f"{derived_dir}/**/*.app", recursive=True)
-
-          if not app_products:
-              print("错误: 未找到 .app 目录")
-              exit(1)
-
-          src_app = app_products[0]
-          print(f"找到源 App 路径: {src_app}")
-
-          for item in os.listdir(src_app):
-              s = os.path.join(src_app, item)
-              d = os.path.join(app_dir, item)
-              if os.path.isdir(s):
-                  shutil.copytree(s, d, dirs_exist_ok=True)
-              else:
-                  shutil.copy2(s, d)
-
-          # 清理无用目录
-          for target in ["Frameworks", "_CodeSignature", "embedded.mobileprovision"]:
-              p = os.path.join(app_dir, target)
-              if os.path.exists(p):
-                  if os.path.isdir(p):
-                      shutil.rmtree(p)
-                  else:
-                      os.remove(p)
-
-          # 1. 查找真实的 Mach-O 机器码可执行程序
-          old_exec_path = None
-          old_exec_name = None
-          try:
-              files = [os.path.join(app_dir, f) for f in os.listdir(app_dir) if os.path.isfile(os.path.join(app_dir, f))]
-              res = subprocess.run(["file"] + files, capture_output=True, text=True)
-              for line in res.stdout.splitlines():
-                  if "Mach-O" in line and "executable" in line:
-                      old_exec_path = line.split(":")[0].strip()
-                      old_exec_name = os.path.basename(old_exec_path)
-                      break
-          except Exception as e:
-              print("file 校验异常:", e)
-
-          # 2. 强行重命名二进制主程序为纯英文 AppModule，解决全能签识别乱码
-          new_exec_name = "AppModule"
-          new_exec_path = os.path.join(app_dir, new_exec_name)
-
-          if old_exec_path and os.path.exists(old_exec_path):
-              if old_exec_path != new_exec_path:
-                  os.rename(old_exec_path, new_exec_path)
-                  print(f"重命名中文二进制程序: {old_exec_name} -> {new_exec_name}")
-          
-          os.chmod(new_exec_path, 0o755)
-
-          # 3. 构造 100% 纯英文兼容的 Info.plist 属性字典
-          plist_path = os.path.join(app_dir, "Info.plist")
-          plist = {
-              "CFBundleDevelopmentRegion": "zh_CN",
-              "CFBundleExecutable": new_exec_name,
-              "CFBundleIdentifier": "com.youdao.app",
-              "CFBundleInfoDictionaryVersion": "6.0",
-              "CFBundleName": "Youdao",
-              "CFBundleDisplayName": "Youdao",
-              "CFBundlePackageType": "APPL",
-              "CFBundleSignature": "????",
-              "CFBundleShortVersionString": "1.0.0",
-              "CFBundleVersion": "1.0.0",
-              "MinimumOSVersion": "16.0",
-              "CFBundleSupportedPlatforms": ["iPhoneOS"],
-              "UIDeviceFamily": [1, 2],
-              "LSRequiresIPhoneOS": True,
-              "UILaunchScreen": {},
-              "UIApplicationSceneManifest": {
-                  "UIApplicationSupportsMultipleScenes": True,
-                  "UISceneConfigurations": {}
-              }
-          }
-
-          with open(plist_path, "wb") as f:
-              plistlib.dump(plist, f, fmt=plistlib.FMT_BINARY)
-
-          print("纯英文 Info.plist 重构完成，全能签读包保证成功！")
-          EOF
-
-          export COPYFILE_DISABLE=1
-          export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
-          find Payload -name "._*" -delete
-          find Payload -name ".DS_Store" -delete
-          rm -rf Payload/__MACOSX
-
-          chmod -R 755 Payload/
-          chmod +x Payload/App.app/*
-
-          rm -f Youdao_Unsigned.ipa
-          zip -qr -y -X Youdao_Unsigned.ipa Payload -x "*.DS_Store" -x "*/._*"
-
-      - name: Publish Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release delete v1.0.0 --yes || true
-          git tag -d v1.0.0 || true
-          git push --delete origin v1.0.0 || true
-
-          gh release create v1.0.0 Youdao_Unsigned.ipa \
-            --title "最新安装包 Youdao_Unsigned.ipa" \
-            --notes "点击下方 Youdao_Unsigned.ipa 即可直接下载并导入全能签。"
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: You-App-IPA
+          path: You.ipa
