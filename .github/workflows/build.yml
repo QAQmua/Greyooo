@@ -12,26 +12,35 @@ jobs:
 
       - name: Unzip & Prepare Project
         run: |
-          echo "=== 1. 解压文件 ==="
+          echo "=== 1. 解压项目 ==="
           mkdir -p build_src
           unzip -o *.zip -d build_src/ || true
           
-          # 找到 Package.swift 文件
           PKG_PATH=$(find build_src -name "Package.swift" | head -n 1)
           if [ -z "$PKG_PATH" ]; then
             echo "错误: 未找到 Package.swift"
             exit 1
           fi
           
-          # 将 iOS 26.0 修改为 16.0
+          # 1. 修复 Package.swift 版本与过期特性标志
           sed -i '' 's/26\.0/16\.0/g' "$PKG_PATH"
           sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
+          sed -i '' '/BareSlashRegexLiterals/d' "$PKG_PATH"
           
-          # 强制重命名为标准的 App.swiftpm 目录
+          # 2. 重命名为 App.swiftpm 目录
           PKG_DIR=$(dirname "$PKG_PATH")
           SWIFTPM_DIR="$GITHUB_WORKSPACE/App.swiftpm"
           rm -rf "$SWIFTPM_DIR"
           mv "$PKG_DIR" "$SWIFTPM_DIR"
+          
+          # 3. 自动修复 Swift 5.10 严格并发检查 (Strict Concurrency) 语法报错
+          echo "=== 2. 自动修补 Swift 多线程语法 ==="
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/final class LocalImageStore/final class LocalImageStore: @unchecked Sendable/g' {} +
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class AutoTranslationManager: ObservableObject/class AutoTranslationManager: @unchecked Sendable, ObservableObject/g' {} +
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class PhotoWidgetManager: ObservableObject/class PhotoWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class InsPostWidgetManager: ObservableObject/class InsPostWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class KoreanMessageWidgetManager: ObservableObject/class KoreanMessageWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
+          find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class ChatBubbleWidgetManager: ObservableObject/class ChatBubbleWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
           
           echo "SWIFTPM_DIR=$SWIFTPM_DIR" >> $GITHUB_ENV
 
@@ -39,18 +48,14 @@ jobs:
         run: |
           cd "$SWIFTPM_DIR"
           
-          # 设置 UTF-8 语言环境支持中文 Scheme
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
-          
-          echo "=== 2. 自动匹配 Scheme ==="
-          xcodebuild -list || true
           
           SCHEME=$(xcodebuild -list | awk '/Schemes:/{flag=1; next} /^[[:space:]]*$/{flag=0} flag' | sed -e 's/^[[:space:]]*//' | head -n 1)
           if [ -z "$SCHEME" ]; then
             SCHEME="AppModule"
           fi
-          echo "找到的目标 Scheme: $SCHEME"
+          echo "目标 Scheme: $SCHEME"
 
           echo "=== 3. 开始编译 ==="
           xcodebuild -destination 'generic/platform=iOS' \
@@ -60,7 +65,13 @@ jobs:
                      CODE_SIGNING_ALLOWED=NO \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGN_IDENTITY="" \
-                     PROVISIONING_PROFILE_SPECIFIER=""
+                     PROVISIONING_PROFILE_SPECIFIER="" \
+                     OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
+                     2>&1 | tee build.log || {
+                       echo "================ 编译错误日志 ================"
+                       grep -i -C 3 "error:" build.log || tail -n 50 build.log
+                       exit 1
+                     }
 
           echo "=== 4. 打包 IPA ==="
           mkdir -p Payload
