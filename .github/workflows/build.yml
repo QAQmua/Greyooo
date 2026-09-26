@@ -1,0 +1,41 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Unzip Source Code
+        run: |
+          mkdir -p src
+          unzip -o *.zip -d src/ || true
+          # 自动修正 iOS 26.0 版本号问题
+          find src -name "Package.swift" -exec sed -i '' 's/"26.0"/"16.0"/g' {} +
+
+      - name: Build App with Xcode
+        run: |
+          PROJECT_DIR=$(find src -name "Package.swift" -exec dirname {} \;)
+          cd "$PROJECT_DIR"
+          
+          xcodebuild -destination 'generic/platform=iOS' \
+                     -scheme AppModule \
+                     -configuration Release \
+                     -derivedDataPath derived_data \
+                     CODE_SIGNING_ALLOWED=NO \
+                     CODE_SIGNING_REQUIRED=NO
+
+          mkdir -p Payload
+          APP_PATH=$(find derived_data -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+          zip -r Youdao_Unsigned.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Youdao_iOS_App
+          path: /**/Youdao_Unsigned.ipa
