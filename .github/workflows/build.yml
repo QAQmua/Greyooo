@@ -22,19 +22,22 @@ jobs:
             exit 1
           fi
           
-          # 1. 修复 Package.swift 版本与过期特性标志
+          # 1. 修复 Package.swift 版本与配置
           sed -i '' 's/26\.0/16\.0/g' "$PKG_PATH"
           sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
           sed -i '' '/BareSlashRegexLiterals/d' "$PKG_PATH"
           
-          # 2. 重命名为 App.swiftpm 目录
+          # 2. 注入 bundleIdentifier 避免全能签缺少 Bundle ID 报错
+          sed -i '' 's/displayVersion:/bundleIdentifier: "com.youdao.app", displayVersion:/g' "$PKG_PATH" || true
+          
+          # 3. 重命名为 App.swiftpm 目录
           PKG_DIR=$(dirname "$PKG_PATH")
           SWIFTPM_DIR="$GITHUB_WORKSPACE/App.swiftpm"
           rm -rf "$SWIFTPM_DIR"
           mv "$PKG_DIR" "$SWIFTPM_DIR"
           
-          # 3. 自动修复 Swift 5.10 严格并发检查 (Strict Concurrency) 语法报错
-          echo "=== 2. 自动修补 Swift 多线程语法 ==="
+          # 4. 修复 Swift 5.10 严格并发检查
+          echo "=== 2. 修补 Swift 多线程语法 ==="
           find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/final class LocalImageStore/final class LocalImageStore: @unchecked Sendable/g' {} +
           find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class AutoTranslationManager: ObservableObject/class AutoTranslationManager: @unchecked Sendable, ObservableObject/g' {} +
           find "$SWIFTPM_DIR" -name "*.swift" -exec sed -i '' 's/class PhotoWidgetManager: ObservableObject/class PhotoWidgetManager: @unchecked Sendable, ObservableObject/g' {} +
@@ -62,26 +65,42 @@ jobs:
                      -scheme "$SCHEME" \
                      -configuration Release \
                      -derivedDataPath derived_data \
+                     PRODUCT_BUNDLE_IDENTIFIER="com.youdao.app" \
                      CODE_SIGNING_ALLOWED=NO \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGN_IDENTITY="" \
                      PROVISIONING_PROFILE_SPECIFIER="" \
-                     OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
-                     2>&1 | tee build.log || {
-                       echo "================ 编译错误日志 ================"
-                       grep -i -C 3 "error:" build.log || tail -n 50 build.log
-                       exit 1
-                     }
+                     OTHER_SWIFT_FLAGS="-strict-concurrency=minimal"
 
-          echo "=== 4. 打包 IPA ==="
-          mkdir -p Payload
-          APP_PATH=$(find derived_data -name "*.app" | head -n 1)
+          echo "=== 4. 修复 Info.plist 并打包IPA ==="
+          APP_PATH=$(find derived_data/Build/Products/ -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find derived_data -name "*.app" | grep -v "Intermediates" | head -n 1)
+          fi
+          
           if [ -z "$APP_PATH" ]; then
             echo "错误: 未找到编译出的 .app 文件"
             exit 1
           fi
-          cp -r "$APP_PATH" Payload/
-          zip -r "$GITHUB_WORKSPACE/Youdao_Unsigned.ipa" Payload
+          echo "发现应用包路径: $APP_PATH"
+
+          # 强制修复 Info.plist，确保全能签 100% 识别成功
+          INFO_PLIST="$APP_PATH/Info.plist"
+          if [ -f "$INFO_PLIST" ]; then
+            plutil -replace CFBundleIdentifier -string "com.youdao.app" "$INFO_PLIST" || plutil -insert CFBundleIdentifier -string "com.youdao.app" "$INFO_PLIST"
+            plutil -replace CFBundleName -string "Youdao" "$INFO_PLIST" || plutil -insert CFBundleName -string "Youdao" "$INFO_PLIST"
+            plutil -replace CFBundleDisplayName -string "幼刀" "$INFO_PLIST" || plutil -insert CFBundleDisplayName -string "幼刀" "$INFO_PLIST"
+          fi
+
+          # 构建标准的 Payload 目录（将 App 改为英文名称，防止全能签解压报错）
+          rm -rf Payload Youdao_Unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/App.app
+          
+          chmod -R 755 Payload/
+          chmod +x Payload/App.app/*
+          
+          zip -qr -y "$GITHUB_WORKSPACE/Youdao_Unsigned.ipa" Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
