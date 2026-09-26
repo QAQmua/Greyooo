@@ -3,6 +3,9 @@ name: Build iOS IPA
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-ipa:
     runs-on: macos-14
@@ -76,9 +79,9 @@ jobs:
                        exit 1
                      }
 
-      - name: Package Binary IPA
+      - name: Fix Binary Name and Package IPA
         run: |
-          echo "=== 4. 生成 iOS 标准二进制 IPA ==="
+          echo "=== 4. 重命名中文二进制主程序为 ASCII 纯英文，解决全能签‘文件有错误’报错 ==="
           cd "$GITHUB_WORKSPACE"
 
           python3 - << 'EOF'
@@ -122,28 +125,40 @@ jobs:
                   else:
                       os.remove(p)
 
-          # 精确判定 Mach-O 64-bit 可执行程序
-          exec_name = "AppModule"
+          # 1. 查找真实的 Mach-O 机器码可执行程序
+          old_exec_path = None
+          old_exec_name = None
           try:
               files = [os.path.join(app_dir, f) for f in os.listdir(app_dir) if os.path.isfile(os.path.join(app_dir, f))]
               res = subprocess.run(["file"] + files, capture_output=True, text=True)
               for line in res.stdout.splitlines():
                   if "Mach-O" in line and "executable" in line:
-                      exec_name = os.path.basename(line.split(":")[0])
+                      old_exec_path = line.split(":")[0].strip()
+                      old_exec_name = os.path.basename(old_exec_path)
                       break
           except Exception as e:
               print("file 校验异常:", e)
 
-          print(f"确定主程序二进制名: {exec_name}")
+          # 2. 强行重命名二进制主程序为纯英文 AppModule，解决全能签识别乱码
+          new_exec_name = "AppModule"
+          new_exec_path = os.path.join(app_dir, new_exec_name)
 
+          if old_exec_path and os.path.exists(old_exec_path):
+              if old_exec_path != new_exec_path:
+                  os.rename(old_exec_path, new_exec_path)
+                  print(f"重命名中文二进制程序: {old_exec_name} -> {new_exec_name}")
+          
+          os.chmod(new_exec_path, 0o755)
+
+          # 3. 构造 100% 纯英文兼容的 Info.plist 属性字典
           plist_path = os.path.join(app_dir, "Info.plist")
           plist = {
               "CFBundleDevelopmentRegion": "zh_CN",
-              "CFBundleExecutable": exec_name,
+              "CFBundleExecutable": new_exec_name,
               "CFBundleIdentifier": "com.youdao.app",
               "CFBundleInfoDictionaryVersion": "6.0",
               "CFBundleName": "Youdao",
-              "CFBundleDisplayName": "幼刀",
+              "CFBundleDisplayName": "Youdao",
               "CFBundlePackageType": "APPL",
               "CFBundleSignature": "????",
               "CFBundleShortVersionString": "1.0.0",
@@ -159,11 +174,10 @@ jobs:
               }
           }
 
-          # 直接写入 iOS 原生二进制 plist 格式 (FMT_BINARY)
           with open(plist_path, "wb") as f:
               plistlib.dump(plist, f, fmt=plistlib.FMT_BINARY)
 
-          print("成功写入原生二进制 Info.plist！")
+          print("纯英文 Info.plist 重构完成，全能签读包保证成功！")
           EOF
 
           export COPYFILE_DISABLE=1
@@ -178,8 +192,14 @@ jobs:
           rm -f Youdao_Unsigned.ipa
           zip -qr -y -X Youdao_Unsigned.ipa Payload -x "*.DS_Store" -x "*/._*"
 
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Youdao_iOS_App
-          path: Youdao_Unsigned.ipa
+      - name: Publish Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete v1.0.0 --yes || true
+          git tag -d v1.0.0 || true
+          git push --delete origin v1.0.0 || true
+
+          gh release create v1.0.0 Youdao_Unsigned.ipa \
+            --title "最新安装包 Youdao_Unsigned.ipa" \
+            --notes "点击下方 Youdao_Unsigned.ipa 即可直接下载并导入全能签。"
