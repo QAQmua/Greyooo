@@ -27,7 +27,7 @@ jobs:
           sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
           sed -i '' '/BareSlashRegexLiterals/d' "$PKG_PATH"
           
-          # 2. 重命名为 App.swiftpm 目录
+          # 2. 重命名目录
           PKG_DIR=$(dirname "$PKG_PATH")
           SWIFTPM_DIR="$GITHUB_WORKSPACE/App.swiftpm"
           rm -rf "$SWIFTPM_DIR"
@@ -58,13 +58,13 @@ jobs:
           echo "目标 Scheme: $SCHEME"
 
           rm -rf /tmp/derived_data
-          echo "=== 3. 开始编译 ==="
+          echo "=== 3. 开始编译 (关闭冗余 Swift 动态库嵌入) ==="
           xcodebuild -destination 'generic/platform=iOS' \
                      -scheme "$SCHEME" \
                      -configuration Release \
                      -derivedDataPath /tmp/derived_data \
                      PRODUCT_BUNDLE_IDENTIFIER="com.youdao.app" \
-                     ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+                     ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
                      CODE_SIGNING_ALLOWED=NO \
                      CODE_SIGNING_REQUIRED=NO \
                      CODE_SIGN_IDENTITY="" \
@@ -78,7 +78,7 @@ jobs:
 
       - name: Package Clean IPA for ESign
         run: |
-          echo "=== 4. 清理残留签名并组装纯净 Payload（防全能签签名闪退） ==="
+          echo "=== 4. 转换二进制 Plist 与清除所有外部 Frameworks 动态库 ==="
           APP_PATH=$(find /tmp/derived_data/Build/Products/ -name "*.app" | head -n 1)
           if [ -z "$APP_PATH" ]; then
             APP_PATH=$(find /tmp/derived_data -name "*.app" | grep -v "Intermediates" | head -n 1)
@@ -90,20 +90,22 @@ jobs:
           fi
           echo "发现应用包路径: $APP_PATH"
 
-          # 彻底重新构建 Payload/App.app 目录结构，绝不产生双层嵌套
           rm -rf Payload "$GITHUB_WORKSPACE/Youdao_Unsigned.ipa"
           mkdir -p Payload/App.app
 
-          # 只拷贝文件夹内部的所有具体文件，防止嵌套
+          # 只拷贝文件夹内容，防止多层嵌套
           cp -R "$APP_PATH/"* Payload/App.app/
 
-          # 用 Python 清洗残留签名、调试文件并修复 Info.plist
+          # 彻底清除 Frameworks 目录（iOS 16 自带 Swift 运行库，剔除外部未签名 dylib 避免动态库报错）
+          rm -rf Payload/App.app/Frameworks
+
+          # 用 Python 补齐全能签卡片读取必需的完整属性字典
           python3 - << 'EOF'
           import os, shutil, plistlib
 
           app_path = "Payload/App.app"
 
-          # 1. 彻底清空旧签名文件夹（解决全能签重签名引擎闪退的核心）
+          # 1. 彻底清空旧签名与描述文件
           code_sig = os.path.join(app_path, "_CodeSignature")
           if os.path.exists(code_sig):
               shutil.rmtree(code_sig)
@@ -112,16 +114,7 @@ jobs:
           if os.path.exists(provision):
               os.remove(provision)
 
-          # 2. 扫尾：删除任何嵌套的 .app 或 .dSYM 调试文件
-          for item in os.listdir(app_path):
-              item_path = os.path.join(app_path, item)
-              if item.endswith(".dSYM") or (item.endswith(".app") and os.path.isdir(item_path)):
-                  if os.path.isdir(item_path):
-                      shutil.rmtree(item_path)
-                  else:
-                      os.remove(item_path)
-
-          # 3. 补全 Info.plist 关键信息
+          # 2. 精准查找主可执行文件
           info_plist_path = os.path.join(app_path, "Info.plist")
           exec_name = None
           for f in os.listdir(app_path):
@@ -133,35 +126,39 @@ jobs:
           if not exec_name:
               exec_name = "AppModule"
 
-          try:
-              with open(info_plist_path, "rb") as f:
-                  plist = plistlib.load(f)
-          except Exception:
-              plist = {}
-
-          plist["CFBundleIdentifier"] = "com.youdao.app"
-          plist["CFBundleName"] = "Youdao"
-          plist["CFBundleDisplayName"] = "幼刀"
-          plist["CFBundleExecutable"] = exec_name
-          plist["CFBundlePackageType"] = "APPL"
-          plist["CFBundleShortVersionString"] = "1.0"
-          plist["CFBundleVersion"] = "1"
-          plist["MinimumOSVersion"] = "16.0"
-          plist["CFBundleSupportedPlatforms"] = ["iPhoneOS"]
-          plist["UIDeviceFamily"] = [1, 2]
-          plist["UILaunchScreen"] = {}
-          plist["UIApplicationSceneManifest"] = {
-              "UIApplicationSupportsMultipleScenes": True,
-              "UISceneConfigurations": {}
+          # 3. 构造全能签 UI 读取所需的标准 iOS 字典
+          plist = {
+              "CFBundleDevelopmentRegion": "zh_CN",
+              "CFBundleExecutable": exec_name,
+              "CFBundleIdentifier": "com.youdao.app",
+              "CFBundleInfoDictionaryVersion": "6.0",
+              "CFBundleName": "Youdao",
+              "CFBundleDisplayName": "幼刀",
+              "CFBundlePackageType": "APPL",
+              "CFBundleSignature": "????",
+              "CFBundleShortVersionString": "1.0",
+              "CFBundleVersion": "1",
+              "MinimumOSVersion": "16.0",
+              "CFBundleSupportedPlatforms": ["iPhoneOS"],
+              "UIDeviceFamily": [1, 2],
+              "LSRequiresIPhoneOS": True,
+              "UILaunchScreen": {},
+              "UIApplicationSceneManifest": {
+                  "UIApplicationSupportsMultipleScenes": True,
+                  "UISceneConfigurations": {}
+              }
           }
 
           with open(info_plist_path, "wb") as f:
               plistlib.dump(plist, f)
 
-          print(f"清洗成功，主执行文件名: {exec_name}")
+          print(f"配置文件组装成功，可执行文件: {exec_name}")
           EOF
 
-          # 清理苹果属性垃圾文件
+          # 强制将 Info.plist 转为 iOS 原生二进制 plist 格式（解决全能签显示“配置一片白”）
+          plutil -convert binary1 Payload/App.app/Info.plist
+
+          # 清理垃圾文件
           export COPYFILE_DISABLE=1
           export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
           find Payload -name "._*" -delete
@@ -171,7 +168,7 @@ jobs:
           chmod -R 755 Payload/
           chmod +x Payload/App.app/*
 
-          # 压成纯净 IPA
+          # 压成纯净无 dylib 干扰的 IPA
           zip -qr -y -X "$GITHUB_WORKSPACE/Youdao_Unsigned.ipa" Payload -x "*.DS_Store" -x "*/._*"
 
       - name: Upload IPA Artifact
