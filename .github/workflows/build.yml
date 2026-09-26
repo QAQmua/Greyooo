@@ -16,24 +16,22 @@ jobs:
           mkdir -p build_src
           unzip -o *.zip -d build_src/ || true
           
-          echo "=== 2. 查找 Package.swift 并修复 iOS 版本 ==="
+          # 找到 Package.swift 文件
           PKG_PATH=$(find build_src -name "Package.swift" | head -n 1)
           if [ -z "$PKG_PATH" ]; then
-            echo "错误: 未找到 Package.swift 文件！"
+            echo "错误: 未找到 Package.swift"
             exit 1
           fi
           
-          # 将 26.0 替换为 16.0
+          # 将 iOS 26.0 修改为 16.0
           sed -i '' 's/26\.0/16\.0/g' "$PKG_PATH"
           sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
           
-          # 确保项目文件夹包含 .swiftpm 后缀（Xcode 识别 Playgrounds 项目必需）
+          # 强制重命名为标准的 App.swiftpm 目录
           PKG_DIR=$(dirname "$PKG_PATH")
-          PARENT_DIR=$(dirname "$PKG_DIR")
-          SWIFTPM_DIR="${PARENT_DIR}/App.swiftpm"
-          if [ "$PKG_DIR" != "$SWIFTPM_DIR" ]; then
-            mv "$PKG_DIR" "$SWIFTPM_DIR"
-          fi
+          SWIFTPM_DIR="$GITHUB_WORKSPACE/App.swiftpm"
+          rm -rf "$SWIFTPM_DIR"
+          mv "$PKG_DIR" "$SWIFTPM_DIR"
           
           echo "SWIFTPM_DIR=$SWIFTPM_DIR" >> $GITHUB_ENV
 
@@ -41,38 +39,41 @@ jobs:
         run: |
           cd "$SWIFTPM_DIR"
           
-          echo "=== 3. 自动匹配 Xcode Scheme ==="
+          # 设置 UTF-8 语言环境支持中文 Scheme
+          export LANG=en_US.UTF-8
+          export LC_ALL=en_US.UTF-8
+          
+          echo "=== 2. 自动匹配 Scheme ==="
           xcodebuild -list || true
           
-          # 自动寻找 Scheme 名称
-          SCHEME_NAME=$(xcodebuild -list | grep -A 10 "Schemes:" | tail -n +2 | xargs | awk '{print $1}')
-          if [ -z "$SCHEME_NAME" ]; then
-            SCHEME_NAME="幼刀"
+          SCHEME=$(xcodebuild -list | awk '/Schemes:/{flag=1; next} /^[[:space:]]*$/{flag=0} flag' | sed -e 's/^[[:space:]]*//' | head -n 1)
+          if [ -z "$SCHEME" ]; then
+            SCHEME="AppModule"
           fi
-          echo "最终使用 Scheme: $SCHEME_NAME"
+          echo "找到的目标 Scheme: $SCHEME"
 
-          echo "=== 4. 开始编译 ==="
+          echo "=== 3. 开始编译 ==="
           xcodebuild -destination 'generic/platform=iOS' \
-                     -scheme "$SCHEME_NAME" \
+                     -scheme "$SCHEME" \
                      -configuration Release \
                      -derivedDataPath derived_data \
                      CODE_SIGNING_ALLOWED=NO \
                      CODE_SIGNING_REQUIRED=NO \
-                     CODE_SIGN_IDENTITY=""
+                     CODE_SIGN_IDENTITY="" \
+                     PROVISIONING_PROFILE_SPECIFIER=""
 
-          echo "=== 5. 打包 IPA ==="
+          echo "=== 4. 打包 IPA ==="
           mkdir -p Payload
           APP_PATH=$(find derived_data -name "*.app" | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "错误: 未找到生成的 .app 文件"
+            echo "错误: 未找到编译出的 .app 文件"
             exit 1
           fi
           cp -r "$APP_PATH" Payload/
-          zip -r Youdao_Unsigned.ipa Payload
+          zip -r "$GITHUB_WORKSPACE/Youdao_Unsigned.ipa" Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: Youdao_iOS_App
-          path: /**/Youdao_Unsigned.ipa
+          path: Youdao_Unsigned.ipa
