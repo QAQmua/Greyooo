@@ -10,32 +10,69 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Unzip Source Code
+      - name: Unzip & Prepare Project
         run: |
-          mkdir -p src
-          unzip -o *.zip -d src/ || true
-          # 自动修正 iOS 26.0 版本号问题
-          find src -name "Package.swift" -exec sed -i '' 's/"26.0"/"16.0"/g' {} +
+          echo "=== 1. 解压文件 ==="
+          mkdir -p build_src
+          unzip -o *.zip -d build_src/ || true
+          
+          echo "=== 2. 查找 Package.swift 并修复 iOS 版本 ==="
+          PKG_PATH=$(find build_src -name "Package.swift" | head -n 1)
+          if [ -z "$PKG_PATH" ]; then
+            echo "错误: 未找到 Package.swift 文件！"
+            exit 1
+          fi
+          
+          # 将 26.0 替换为 16.0
+          sed -i '' 's/26\.0/16\.0/g' "$PKG_PATH"
+          sed -i '' 's/"26\.0"/"16\.0"/g' "$PKG_PATH"
+          
+          # 确保项目文件夹包含 .swiftpm 后缀（Xcode 识别 Playgrounds 项目必需）
+          PKG_DIR=$(dirname "$PKG_PATH")
+          PARENT_DIR=$(dirname "$PKG_DIR")
+          SWIFTPM_DIR="${PARENT_DIR}/App.swiftpm"
+          if [ "$PKG_DIR" != "$SWIFTPM_DIR" ]; then
+            mv "$PKG_DIR" "$SWIFTPM_DIR"
+          fi
+          
+          echo "SWIFTPM_DIR=$SWIFTPM_DIR" >> $GITHUB_ENV
 
       - name: Build App with Xcode
         run: |
-          PROJECT_DIR=$(find src -name "Package.swift" -exec dirname {} \;)
-          cd "$PROJECT_DIR"
+          cd "$SWIFTPM_DIR"
           
+          echo "=== 3. 自动匹配 Xcode Scheme ==="
+          xcodebuild -list || true
+          
+          # 自动寻找 Scheme 名称
+          SCHEME_NAME=$(xcodebuild -list | grep -A 10 "Schemes:" | tail -n +2 | xargs | awk '{print $1}')
+          if [ -z "$SCHEME_NAME" ]; then
+            SCHEME_NAME="幼刀"
+          fi
+          echo "最终使用 Scheme: $SCHEME_NAME"
+
+          echo "=== 4. 开始编译 ==="
           xcodebuild -destination 'generic/platform=iOS' \
-                     -scheme AppModule \
+                     -scheme "$SCHEME_NAME" \
                      -configuration Release \
                      -derivedDataPath derived_data \
                      CODE_SIGNING_ALLOWED=NO \
-                     CODE_SIGNING_REQUIRED=NO
+                     CODE_SIGNING_REQUIRED=NO \
+                     CODE_SIGN_IDENTITY=""
 
+          echo "=== 5. 打包 IPA ==="
           mkdir -p Payload
           APP_PATH=$(find derived_data -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "错误: 未找到生成的 .app 文件"
+            exit 1
+          fi
           cp -r "$APP_PATH" Payload/
           zip -r Youdao_Unsigned.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: Youdao_iOS_App
           path: /**/Youdao_Unsigned.ipa
